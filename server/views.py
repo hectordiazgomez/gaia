@@ -72,6 +72,7 @@ def train_nmt(request):
     if request.method == 'POST':
         source_lang = request.POST.get('sourceLang')
         target_lang = request.POST.get('targetLang')
+        path = request.POST.get('path')
         mosesPunctNormalizer = request.POST.get('MosesPunctNormalizer')
         batch_size = int(request.POST.get('batchSize', 32))
         max_length = int(request.POST.get('maxLength', 128))
@@ -109,6 +110,7 @@ def train_nmt(request):
 
         tokenizer = NllbTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
         model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
+
         fix_tokenizer(tokenizer, new_lang=source_lang)
         model.resize_token_embeddings(len(tokenizer))
         print("Going to optimizer now")
@@ -139,17 +141,17 @@ def train_nmt(request):
             if step % 10 == 0:
                 print(f"Step {step}, Loss: {loss.item()}")
 
-        if not os.path.exists("models"):
-            os.makedirs("models")
-        model.save_pretrained("models")
-        tokenizer.save_pretrained("models")
+        if not os.path.exists(f"models/{path}"):
+            os.makedirs(f"models/{path}")
+        model.save_pretrained(f"models/{path}")
+        tokenizer.save_pretrained(f"models/{path}")
 
         return JsonResponse({'message': 'Training completed successfully'})
 
     return JsonResponse({'error': 'Invalid request method'}, status=405)
 
 
-def fix_tokenizer(tokenizer, new_lang):
+def fix_tokenizer(new_lang):
     old_len = len(tokenizer) - int(new_lang in tokenizer.added_tokens_encoder)
     tokenizer.lang_code_to_id[new_lang] = old_len - 1
     tokenizer.id_to_lang_code[old_len - 1] = new_lang
@@ -170,6 +172,7 @@ def get_batch(df, batch_size):
     return source_texts, target_texts
 
 def tokenizer_for_translation(tokenizer, new_lang):
+    print("Starting tokenizer_for_translation function")
     old_len = len(tokenizer) - int(new_lang in tokenizer.added_tokens_encoder)
     tokenizer.lang_code_to_id[new_lang] = old_len - 1
     tokenizer.id_to_lang_code[old_len - 1] = new_lang
@@ -180,65 +183,66 @@ def tokenizer_for_translation(tokenizer, new_lang):
         tokenizer._additional_special_tokens.append(new_lang)
     tokenizer.added_tokens_encoder = {}
     tokenizer.added_tokens_decoder = {}
+    print("Finished tokenizer_for_translation function")
 
-def translate(text, model, tokenizer, src_lang, tgt_lang, max_length=128, num_beams=4, n_out=None, **kwargs):
+def translate2(text, model, tokenizer, src_lang='spa_Latn', tgt_lang='eng_Latn', max_input_length=1024, a=32, b=3, num_beams=4, **kwargs):
     tokenizer.src_lang = src_lang
-    encoded = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-    if max_length == 'auto':
-        max_length = int(32 + 2.0 * encoded.input_ids.shape[1])
-    model.eval()
-    with torch.no_grad():
-        generated_tokens = model.generate(
-            **encoded,
-            forced_bos_token_id=tokenizer.lang_code_to_id[tgt_lang],
-            max_length=max_length,
-            num_beams=num_beams,
-            num_return_sequences=n_out or 1,
-            **kwargs
-        )
-    out = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-    if isinstance(text, str) and n_out is None:
-        return out[0]
-    return out
+    tokenizer.tgt_lang = tgt_lang
+    print("Going to inputs now")
+    inputs = tokenizer(text, return_tensors='pt', padding=True, truncation=True, max_length=max_input_length)
+    result = model.generate(
+        **inputs.to(model.device),
+        forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang),
+        max_new_tokens=int(a + b * inputs.input_ids.shape[1]),
+        num_beams=num_beams,
+        **kwargs
+    )
+    return tokenizer.batch_decode(result, skip_special_tokens=True)
 
 @csrf_exempt
-@require_http_methods(["POST"])
 def translation_endpoint(request):
+    print("Translation endpoint called")
     try:
         data = json.loads(request.body)
         text = data.get('text')
         src_lang = data.get('src_lang')
         tgt_lang = data.get('tgt_lang')
-        model_path = data.get('model_path', 'models')
+        model_path = data.get('path')
         max_length = data.get('max_length', 128)
-        num_beams = data.get('num_beams', 4)
-        n_out = data.get('n_out')
+
+        print(f"Received request: text={text}, src_lang={src_lang}, tgt_lang={tgt_lang}, max_length={max_length}")
 
         if not all([text, src_lang, tgt_lang, model_path]):
+            print("Missing required parameters")
             return JsonResponse({'error': 'Missing required parameters'}, status=400)
         
-        if not os.path.exists(model_path):
+        if not os.path.exists(f"models/{model_path}"):
+            print("Model path does not exist")
             return JsonResponse({'error': 'Model path does not exist'}, status=400)
         
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
-        tokenizer = NllbTokenizer.from_pretrained(model_path)
+        print("Loading model and tokenizer")
+        model = AutoModelForSeq2SeqLM.from_pretrained(f"models/{model_path}")
+        tokenizer = NllbTokenizer.from_pretrained(f"models/{model_path}")
         
+        print("Preparing tokenizer for translation")
         tokenizer_for_translation(tokenizer, src_lang)
         
-        translated_text = translate(
+        print("Starting translation")
+        translated_text = translate2(
             text,
             model,
             tokenizer,
             src_lang=src_lang,
             tgt_lang=tgt_lang,
-            max_length=max_length,
-            num_beams=num_beams,
-            n_out=n_out
+            max_input_length=max_length
         )
 
+        print("Translation completed")
         return JsonResponse({'translated_text': translated_text})
 
     except json.JSONDecodeError:
+        print("Invalid JSON received")
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     except Exception as e:
+        print(f"An error occurred: {str(e)}")
         return JsonResponse({'error': str(e)}, status=500)
