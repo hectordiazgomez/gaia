@@ -151,7 +151,7 @@ def train_nmt(request):
     return JsonResponse({'error': 'Invalid request method'}, status=405)
 
 
-def fix_tokenizer(new_lang):
+def fix_tokenizer(tokenizer, new_lang):
     old_len = len(tokenizer) - int(new_lang in tokenizer.added_tokens_encoder)
     tokenizer.lang_code_to_id[new_lang] = old_len - 1
     tokenizer.id_to_lang_code[old_len - 1] = new_lang
